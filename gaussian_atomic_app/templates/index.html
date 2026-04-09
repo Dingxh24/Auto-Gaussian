@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Gaussian 原子能性质计算器</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="app-shell">
+    <header class="hero">
+        <div>
+            <h1>Gaussian 原子能性质计算器</h1>
+            <p class="subtitle">输入元素序号、.gjf 输出目录和结果表位置后，一键完成生成、计算与汇总。</p>
+        </div>
+        <div class="status-card" id="configStatusCard">
+            <span class="status-label">Gaussian 配置</span>
+            <strong id="gaussianStatusText">检查中...</strong>
+            <small id="gaussianPathText">-</small>
+        </div>
+    </header>
+
+    <main class="grid">
+        <section class="panel">
+            <div class="panel-header">
+                <h2>1. Gaussian 程序路径</h2>
+                <button class="secondary" type="button" id="pickGaussianBtn">选择 Gaussian exe</button>
+            </div>
+            <div class="form-row">
+                <label for="gaussianExe">Gaussian 可执行文件</label>
+                <input id="gaussianExe" type="text" placeholder="例如：C:\\G16W\\g16.exe">
+            </div>
+            <div class="inline-actions">
+                <button type="button" id="saveGaussianBtn">保存路径</button>
+            </div>
+            <p class="hint">请在此选择/填写你本机的 Gaussian 可执行文件路径；后续迁移电脑或更换 Gaussian 版本时也可在这里随时修改。</p>
+        </section>
+
+        <section class="panel">
+            <div class="panel-header">
+                <h2>2. 运行参数</h2>
+            </div>
+            <div class="form-row">
+                <label for="selection">需要计算的元素序号</label>
+                <input id="selection" type="text" value="{{ config.get('last_selection', '') }}" placeholder="支持 1,2,3 / 1-3 / 1-3,5">
+            </div>
+
+            <div class="form-row with-button">
+                <label for="gjfOutputDir">.gjf 文件输出目录</label>
+                <div class="input-with-button">
+                    <input id="gjfOutputDir" type="text" value="{{ config.get('last_gjf_output_dir', '') }}" placeholder="请选择目录">
+                    <button class="secondary" type="button" id="pickGjfDirBtn">浏览目录</button>
+                </div>
+            </div>
+
+            <div class="form-row with-button">
+                <label for="resultOutputTarget">最终结果输出位置</label>
+                <div class="input-with-button">
+                    <input id="resultOutputTarget" type="text" value="{{ config.get('last_result_output_target', '') }}" placeholder="请选择 .xlsx 输出位置或目录">
+                    <button class="secondary" type="button" id="pickResultFileBtn">浏览位置</button>
+                </div>
+            </div>
+
+            <div class="inline-actions">
+                <button class="primary" type="button" id="runBtn">开始计算</button>
+            </div>
+            <p class="hint">结果会同时输出为 Excel 与 CSV。若你选择的是 `.xlsx` 文件，CSV 会自动写到同目录下的同名 `.csv`。</p>
+        </section>
+
+        <section class="panel span-2">
+            <div class="panel-header">
+                <h2>3. 运行状态</h2>
+                <span class="pill" id="jobStatusPill">待命</span>
+            </div>
+            <div class="progress-box">
+                <div class="progress-head">
+                    <span id="progressStep">尚未开始</span>
+                    <span id="progressCount">0 / 0</span>
+                </div>
+                <div class="progress-track">
+                    <div class="progress-bar" id="progressBar"></div>
+                </div>
+            </div>
+            <div class="result-box" id="resultSummary">
+                <div class="empty-state">计算完成后，这里会显示输出文件路径与结果摘要。</div>
+            </div>
+            <div class="log-box" id="logBox"></div>
+        </section>
+    </main>
+</div>
+
+<script>
+const state = {
+    jobId: null,
+    pollTimer: null,
+};
+
+function $(id) {
+    return document.getElementById(id);
+}
+
+function setConfigStatus(configured, path) {
+    $('gaussianStatusText').textContent = configured ? '已配置' : '未配置';
+    $('gaussianPathText').textContent = path || '尚未选择 Gaussian 可执行文件';
+    $('configStatusCard').classList.toggle('danger', !configured);
+}
+
+function setJobStatus(text, kind = 'idle') {
+    const pill = $('jobStatusPill');
+    pill.textContent = text;
+    pill.dataset.kind = kind;
+}
+
+function appendLog(text) {
+    const box = $('logBox');
+    const line = document.createElement('div');
+    line.className = 'log-line';
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+}
+
+function replaceLogs(logs) {
+    const box = $('logBox');
+    box.innerHTML = '';
+    logs.forEach(item => {
+        const line = document.createElement('div');
+        line.className = 'log-line';
+        line.textContent = item;
+        box.appendChild(line);
+    });
+    box.scrollTop = box.scrollHeight;
+}
+
+function updateProgress(step, current, total) {
+    $('progressStep').textContent = step || '尚未开始';
+    $('progressCount').textContent = `${current} / ${total}`;
+    const percent = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
+    $('progressBar').style.width = `${percent}%`;
+}
+
+function renderResult(result) {
+    if (!result) {
+        $('resultSummary').innerHTML = '<div class="empty-state">暂无结果。</div>';
+        return;
+    }
+
+    const rows = (result.preview || []).slice(0, 5).map(row => `
+        <tr>
+            <td>${row['原子序数'] ?? ''}</td>
+            <td>${row['元素符号'] ?? ''}</td>
+            <td>${row['第一电离能（eV）'] ?? ''}</td>
+            <td>${row['电子亲和能（eV）'] ?? ''}</td>
+            <td>${row['化学势（eV）'] ?? ''}</td>
+            <td>${row['Mulliken 电负性'] ?? ''}</td>
+        </tr>
+    `).join('');
+
+    $('resultSummary').innerHTML = `
+        <div class="summary-grid">
+            <div>
+                <div class="summary-label">已生成 .gjf 文件数</div>
+                <div class="summary-value">${result.generated_count}</div>
+            </div>
+            <div>
+                <div class="summary-label">结果表行数</div>
+                <div class="summary-value">${result.result_count}</div>
+            </div>
+            <div>
+                <div class="summary-label">Excel 输出</div>
+                <div class="summary-path">${result.xlsx_path}</div>
+            </div>
+            <div>
+                <div class="summary-label">CSV 输出</div>
+                <div class="summary-path">${result.csv_path}</div>
+            </div>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>原子序数</th>
+                        <th>元素</th>
+                        <th>第一电离能</th>
+                        <th>电子亲和能</th>
+                        <th>化学势</th>
+                        <th>电负性</th>
+                    </tr>
+                </thead>
+                <tbody>${rows || '<tr><td colspan="6">暂无预览数据</td></tr>'}</tbody>
+            </table>
+        </div>
+    `;
+}
+
+async function loadConfig() {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+    if (!data.ok) return;
+    const config = data.config || {};
+    $('gaussianExe').value = config.gaussian_exe || '';
+    if (!$('gjfOutputDir').value) $('gjfOutputDir').value = config.last_gjf_output_dir || '';
+    if (!$('resultOutputTarget').value) $('resultOutputTarget').value = config.last_result_output_target || '';
+    if (!$('selection').value) $('selection').value = config.last_selection || '';
+    setConfigStatus(Boolean(data.configured), config.gaussian_exe || '');
+}
+
+async function chooseGaussianExe() {
+    if (!window.pywebview?.api) {
+        alert('当前运行环境不支持桌面文件选择，请手动输入路径。');
+        return;
+    }
+    const result = await window.pywebview.api.choose_gaussian_exe();
+    if (result?.ok) {
+        $('gaussianExe').value = result.path;
+        setConfigStatus(true, result.path);
+        appendLog(`已配置 Gaussian 路径：${result.path}`);
+    }
+}
+
+async function chooseFolder(targetInputId) {
+    if (!window.pywebview?.api) {
+        alert('当前运行环境不支持桌面目录选择，请手动输入路径。');
+        return;
+    }
+    const result = await window.pywebview.api.choose_output_folder();
+    if (result?.ok) {
+        $(targetInputId).value = result.path;
+    }
+}
+
+async function chooseResultFile() {
+    if (!window.pywebview?.api) {
+        alert('当前运行环境不支持桌面保存对话框，请手动输入路径。');
+        return;
+    }
+    const result = await window.pywebview.api.choose_result_file();
+    if (result?.ok) {
+        $('resultOutputTarget').value = result.path;
+    }
+}
+
+async function saveGaussianExe() {
+    const gaussianExe = $('gaussianExe').value.trim();
+    const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ gaussian_exe: gaussianExe })
+    });
+    const data = await res.json();
+    if (!data.ok) {
+        alert(data.error || '保存失败');
+        return;
+    }
+    setConfigStatus(true, data.config.gaussian_exe || gaussianExe);
+    appendLog('Gaussian 路径已保存。');
+}
+
+async function runJob() {
+    const payload = {
+        selection: $('selection').value.trim(),
+        gjf_output_dir: $('gjfOutputDir').value.trim(),
+        result_output_target: $('resultOutputTarget').value.trim(),
+    };
+
+    $('resultSummary').innerHTML = '<div class="empty-state">任务执行中，请稍候...</div>';
+    replaceLogs([]);
+    updateProgress('初始化', 0, 0);
+    setJobStatus('提交中', 'running');
+
+    const res = await fetch('/api/run', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!data.ok) {
+        setJobStatus('失败', 'error');
+        alert(data.error || '任务启动失败');
+        return;
+    }
+
+    state.jobId = data.job_id;
+    setJobStatus('运行中', 'running');
+    appendLog(`任务已启动：${state.jobId}`);
+    startPolling();
+}
+
+async function pollJob() {
+    if (!state.jobId) return;
+    const res = await fetch(`/api/jobs/${state.jobId}`);
+    const data = await res.json();
+    if (!data.ok) {
+        stopPolling();
+        setJobStatus('失败', 'error');
+        return;
+    }
+
+    const job = data.job;
+    replaceLogs(job.logs || []);
+    updateProgress(job.current_step || job.message || '处理中', job.progress_current || 0, job.progress_total || 0);
+
+    if (job.status === 'success') {
+        stopPolling();
+        setJobStatus('完成', 'success');
+        renderResult(job.result);
+    } else if (job.status === 'error') {
+        stopPolling();
+        setJobStatus('失败', 'error');
+        $('resultSummary').innerHTML = `<div class="empty-state error">任务失败：${job.message || '未知错误'}</div>`;
+    } else {
+        setJobStatus('运行中', 'running');
+    }
+}
+
+function startPolling() {
+    stopPolling();
+    state.pollTimer = setInterval(pollJob, 1200);
+    pollJob();
+}
+
+function stopPolling() {
+    if (state.pollTimer) {
+        clearInterval(state.pollTimer);
+        state.pollTimer = null;
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    $('pickGaussianBtn').addEventListener('click', chooseGaussianExe);
+    $('saveGaussianBtn').addEventListener('click', saveGaussianExe);
+    $('pickGjfDirBtn').addEventListener('click', () => chooseFolder('gjfOutputDir'));
+    $('pickResultFileBtn').addEventListener('click', chooseResultFile);
+    $('runBtn').addEventListener('click', runJob);
+    loadConfig();
+});
+</script>
+</body>
+</html>
