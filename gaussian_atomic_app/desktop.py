@@ -64,7 +64,7 @@ def launch_desktop_app() -> None:
     api = DesktopAPI()
     app = create_app()
     window = webview.create_window(
-        'Gaussian 原子能性质计算器',
+        '解放双手，一键高斯！',
         app,
         js_api=api,
         width=1100,
